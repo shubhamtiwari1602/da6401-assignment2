@@ -1,0 +1,37 @@
+# Secrets — NEVER commit these
+.env
+
+# Packaged archives (Kaggle upload zips etc.)
+*.zip
+*.tar
+
+checkpoints/*.pth
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# W&B local run data
+wandb/
+
+# Data (large, downloaded on the fly)
+data/oxford-iiit-pet/
+
+# Temp skeleton clone used for diffing
+tmp_skeleton/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
