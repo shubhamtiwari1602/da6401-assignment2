@@ -14,12 +14,21 @@ class MultiTaskPerceptionModel(nn.Module):
     """Shared-backbone multi-task model."""
 
     def __init__(self, num_breeds: int = 37, seg_classes: int = 3, in_channels: int = 3,
-                 classifier_path: str = "classifier.pth",
-                 localizer_path: str = "localizer.pth",
-                 unet_path: str = "unet.pth"):
+                 classifier_path: str = None,
+                 localizer_path: str = None,
+                 unet_path: str = None):
         """
         Initialize the shared backbone/heads using these trained weights.
         """
+        # Resolve paths relative to this file so they work regardless of CWD
+        _here = os.path.dirname(os.path.abspath(__file__))
+        if classifier_path is None:
+            classifier_path = os.path.join(_here, "checkpoints", "classifier.pth")
+        if localizer_path is None:
+            localizer_path = os.path.join(_here, "checkpoints", "localizer.pth")
+        if unet_path is None:
+            unet_path = os.path.join(_here, "checkpoints", "unet.pth")
+
         import gdown
         _ids = {
             classifier_path: "1sDZTJ3SVxFUqVxVgXCPzajSEQwVeViKx",
@@ -31,18 +40,18 @@ class MultiTaskPerceptionModel(nn.Module):
                 gdown.download(id=drive_id, output=path, quiet=False)
 
         super().__init__()
-        
+
         self.encoder = VGG11(in_channels=in_channels)
-        
+
         # Instantiate separate models to load heads
         classifier = VGG11Classifier(num_classes=num_breeds, in_channels=in_channels)
         localizer = VGG11Localizer(in_channels=in_channels)
         unet = VGG11UNet(num_classes=seg_classes, in_channels=in_channels)
-        
-        # Load weights reliably
+
+        # Load weights — paths are now absolute so os.path.exists is reliable
         def _load_if_exists(model, path):
             if os.path.exists(path):
-                model.load_state_dict(torch.load(path, map_location="cpu"))
+                model.load_state_dict(torch.load(path, map_location="cpu", weights_only=False))
         
         _load_if_exists(classifier, classifier_path)
         _load_if_exists(localizer, localizer_path)
