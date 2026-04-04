@@ -22,9 +22,9 @@ class MultiTaskPerceptionModel(nn.Module):
         """
         import gdown
         _ids = {
-            classifier_path: "<CLASSIFIER_DRIVE_ID>",
-            localizer_path:  "<LOCALIZER_DRIVE_ID>",
-            unet_path:       "<UNET_DRIVE_ID>",
+            classifier_path: "1sDZTJ3SVxFUqVxVgXCPzajSEQwVeViKx",
+            localizer_path:  "151gfnQk97XDx6KJ0wtPkDCOZkAF1Se7r",
+            unet_path:       "14JQvAPxmd9-UeWKcE6vskYfIfUh5y47L",
         }
         for path, drive_id in _ids.items():
             if not os.path.exists(path) and not drive_id.startswith("<"):
