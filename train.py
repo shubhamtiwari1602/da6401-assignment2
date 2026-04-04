@@ -1,174 +1,275 @@
-"""Training entrypoint
+"""Training entrypoint — separate per-task training
 """
 
+import os
+import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import wandb
-import argparse
-import os
 
-from multitask import MultiTaskPerceptionModel
+from models.classification import VGG11Classifier
+from models.localization import VGG11Localizer
+from models.segmentation import VGG11UNet
 from losses.iou_loss import IoULoss
 from data.pets_dataset import OxfordIIITPetDataset
 
-def train_epoch(model, dataloader, optimizer, metrics_history, device, alpha=1.0, beta=10.0, gamma=1.0):
-    model.train()
-    running_loss = 0.0
-    ce_loss_fn = nn.CrossEntropyLoss()
-    mse_loss_fn = nn.MSELoss()
-    iou_loss_fn = IoULoss()
-    seg_loss_fn = nn.CrossEntropyLoss()
 
-    for batch in tqdm(dataloader, desc="Training"):
-        imgs = batch["image"].to(device)
-        cls_targets = batch["class_label"].to(device)
-        bbox_targets = batch["bbox_target"].to(device)
-        seg_targets = batch["segmentation_mask"].to(device)
-        
-        optimizer.zero_grad()
-        out = model(imgs)
-        
-        loss_cls = ce_loss_fn(out["classification"], cls_targets)
-        loss_box = mse_loss_fn(out["localization"], bbox_targets) + iou_loss_fn(out["localization"], bbox_targets)
-        loss_seg = seg_loss_fn(out["segmentation"], seg_targets)
-        
-        total_loss = alpha * loss_cls + beta * loss_box + gamma * loss_seg
-        total_loss.backward()
-        optimizer.step()
-        
-        running_loss += total_loss.item()
-        wandb.log({
-            "train/loss": total_loss.item(),
-            "train/loss_cls": loss_cls.item(),
-            "train/loss_box": loss_box.item(),
-            "train/loss_seg": loss_seg.item()
-        })
-        
-    return running_loss / len(dataloader)
+# ──────────────────────────────────────────────────────────────
+# Classifier
+# ──────────────────────────────────────────────────────────────
 
-def validate_epoch(model, dataloader, device):
+def train_classifier(args, device):
+    train_ds = OxfordIIITPetDataset(root="./data", split="trainval", download=True)
+    val_ds   = OxfordIIITPetDataset(root="./data", split="test",     download=True)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=2, pin_memory=True)
+    val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
+
+    model = VGG11Classifier(num_classes=37, dropout_p=args.dropout_p).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    loss_fn   = nn.CrossEntropyLoss()
+
+    best_val_acc = 0.0
+    for epoch in range(args.epochs):
+        model.train()
+        train_loss, correct, total = 0.0, 0, 0
+        for batch in tqdm(train_loader, desc=f"[Classifier] Epoch {epoch+1}/{args.epochs}"):
+            imgs   = batch["image"].to(device)
+            labels = batch["class_label"].to(device)
+            optimizer.zero_grad()
+            logits = model(imgs)
+            loss   = loss_fn(logits, labels)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+            correct    += (logits.argmax(1) == labels).sum().item()
+            total      += labels.size(0)
+        scheduler.step()
+
+        train_acc = correct / total
+        val_loss, val_acc = _eval_classifier(model, val_loader, loss_fn, device)
+        print(f"  Epoch {epoch+1}: train_loss={train_loss/len(train_loader):.4f} train_acc={train_acc:.4f} | val_loss={val_loss:.4f} val_acc={val_acc:.4f}")
+        wandb.log({"epoch": epoch+1, "cls/train_loss": train_loss/len(train_loader),
+                   "cls/train_acc": train_acc, "cls/val_loss": val_loss, "cls/val_acc": val_acc})
+
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save(model.state_dict(), "checkpoints/classifier.pth")
+            print(f"  Saved classifier.pth (val_acc={val_acc:.4f})")
+
+    print(f"Best classifier val_acc: {best_val_acc:.4f}")
+
+
+def _eval_classifier(model, loader, loss_fn, device):
     model.eval()
-    running_loss = 0.0
-    ce_loss_fn = nn.CrossEntropyLoss()
-    mse_loss_fn = nn.MSELoss()
-    iou_loss_fn = IoULoss()
-    seg_loss_fn = nn.CrossEntropyLoss()
-    
+    total_loss, correct, total = 0.0, 0, 0
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Validation"):
-            imgs = batch["image"].to(device)
-            cls_targets = batch["class_label"].to(device)
-            bbox_targets = batch["bbox_target"].to(device)
-            seg_targets = batch["segmentation_mask"].to(device)
-            
-            out = model(imgs)
-            
-            loss_cls = ce_loss_fn(out["classification"], cls_targets)
-            loss_box = mse_loss_fn(out["localization"], bbox_targets) + iou_loss_fn(out["localization"], bbox_targets)
-            loss_seg = seg_loss_fn(out["segmentation"], seg_targets)
-            
-            total_loss = loss_cls + 10.0 * loss_box + loss_seg
-            running_loss += total_loss.item()
-            
-            wandb.log({
-                "val/loss": total_loss.item(),
-                "val/loss_cls": loss_cls.item(),
-                "val/loss_box": loss_box.item(),
-                "val/loss_seg": loss_seg.item()
-            })
-            
-    return running_loss / len(dataloader)
+        for batch in loader:
+            imgs   = batch["image"].to(device)
+            labels = batch["class_label"].to(device)
+            logits = model(imgs)
+            total_loss += loss_fn(logits, labels).item()
+            correct    += (logits.argmax(1) == labels).sum().item()
+            total      += labels.size(0)
+    return total_loss / len(loader), correct / total
 
-def save_individual_checkpoints(model, save_dir="checkpoints"):
-    """Extract and save individual model checkpoints from a trained multitask model.
 
-    Remaps multitask state-dict keys to match the standalone model formats
-    expected by VGG11Classifier, VGG11Localizer, and VGG11UNet.
-    """
-    sd = model.state_dict()
+# ──────────────────────────────────────────────────────────────
+# Localizer
+# ──────────────────────────────────────────────────────────────
 
-    cls_sd = {}
-    for k, v in sd.items():
-        if k.startswith("encoder."):
-            cls_sd[k] = v
-        elif k.startswith("cls_pool."):
-            cls_sd[k.replace("cls_pool.", "avgpool.")] = v
-        elif k.startswith("cls_head."):
-            cls_sd[k.replace("cls_head.", "classifier.")] = v
-    torch.save(cls_sd, os.path.join(save_dir, "classifier.pth"))
+def train_localizer(args, device):
+    train_ds = OxfordIIITPetDataset(root="./data", split="trainval", download=True)
+    val_ds   = OxfordIIITPetDataset(root="./data", split="test",     download=True)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=2, pin_memory=True)
+    val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
 
-    loc_sd = {}
-    for k, v in sd.items():
-        if k.startswith("encoder."):
-            loc_sd[k] = v
-        elif k.startswith("loc_pool."):
-            loc_sd[k.replace("loc_pool.", "avgpool.")] = v
-        elif k.startswith("loc_head."):
-            loc_sd[k.replace("loc_head.", "regressor.")] = v
-    torch.save(loc_sd, os.path.join(save_dir, "localizer.pth"))
+    model = VGG11Localizer(dropout_p=args.dropout_p).to(device)
 
-    unet_sd = {}
-    for k, v in sd.items():
-        if k.startswith("encoder.") or k.startswith("upconv") or k.startswith("dec"):
-            unet_sd[k] = v
-        elif k.startswith("seg_final."):
-            unet_sd[k.replace("seg_final.", "final_conv.")] = v
-    torch.save(unet_sd, os.path.join(save_dir, "unet.pth"))
+    # Load pretrained encoder from classifier if available
+    cls_ckpt = "checkpoints/classifier.pth"
+    if os.path.exists(cls_ckpt):
+        cls_sd = torch.load(cls_ckpt, map_location=device, weights_only=False)
+        encoder_sd = {k[len("encoder."):]: v for k, v in cls_sd.items() if k.startswith("encoder.")}
+        model.encoder.load_state_dict(encoder_sd)
+        print("Loaded pretrained encoder from classifier.pth")
 
-    print(f"Individual checkpoints saved to {save_dir}/")
+        # Freeze encoder for first half of training, then unfreeze
+        for p in model.encoder.parameters():
+            p.requires_grad = False
 
+    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    mse_fn    = nn.MSELoss()
+    iou_fn    = IoULoss()
+
+    best_val_loss = float("inf")
+    for epoch in range(args.epochs):
+        # Unfreeze encoder halfway through
+        if epoch == args.epochs // 2:
+            for p in model.encoder.parameters():
+                p.requires_grad = True
+            optimizer = optim.Adam(model.parameters(), lr=args.lr * 0.1, weight_decay=1e-4)
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs - epoch)
+            print("  Unfroze encoder for fine-tuning")
+
+        model.train()
+        train_loss = 0.0
+        for batch in tqdm(train_loader, desc=f"[Localizer] Epoch {epoch+1}/{args.epochs}"):
+            imgs   = batch["image"].to(device)
+            boxes  = batch["bbox_target"].to(device)
+            optimizer.zero_grad()
+            preds  = model(imgs)
+            loss   = mse_fn(preds, boxes) + iou_fn(preds, boxes)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+        scheduler.step()
+
+        val_loss = _eval_localizer(model, val_loader, mse_fn, iou_fn, device)
+        print(f"  Epoch {epoch+1}: train_loss={train_loss/len(train_loader):.4f} | val_loss={val_loss:.4f}")
+        wandb.log({"epoch": epoch+1, "loc/train_loss": train_loss/len(train_loader), "loc/val_loss": val_loss})
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save(model.state_dict(), "checkpoints/localizer.pth")
+            print(f"  Saved localizer.pth (val_loss={val_loss:.4f})")
+
+    print(f"Best localizer val_loss: {best_val_loss:.4f}")
+
+
+def _eval_localizer(model, loader, mse_fn, iou_fn, device):
+    model.eval()
+    total_loss = 0.0
+    with torch.no_grad():
+        for batch in loader:
+            imgs  = batch["image"].to(device)
+            boxes = batch["bbox_target"].to(device)
+            preds = model(imgs)
+            total_loss += (mse_fn(preds, boxes) + iou_fn(preds, boxes)).item()
+    return total_loss / len(loader)
+
+
+# ──────────────────────────────────────────────────────────────
+# U-Net Segmentation
+# ──────────────────────────────────────────────────────────────
+
+def train_unet(args, device):
+    train_ds = OxfordIIITPetDataset(root="./data", split="trainval", download=True)
+    val_ds   = OxfordIIITPetDataset(root="./data", split="test",     download=True)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=2, pin_memory=True)
+    val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
+
+    model = VGG11UNet(num_classes=3, dropout_p=args.dropout_p).to(device)
+
+    # Load pretrained encoder from classifier if available
+    cls_ckpt = "checkpoints/classifier.pth"
+    if os.path.exists(cls_ckpt):
+        cls_sd = torch.load(cls_ckpt, map_location=device, weights_only=False)
+        encoder_sd = {k[len("encoder."):]: v for k, v in cls_sd.items() if k.startswith("encoder.")}
+        model.encoder.load_state_dict(encoder_sd)
+        print("Loaded pretrained encoder from classifier.pth")
+
+        for p in model.encoder.parameters():
+            p.requires_grad = False
+
+    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    ce_fn     = nn.CrossEntropyLoss()
+
+    best_val_dice = 0.0
+    for epoch in range(args.epochs):
+        if epoch == args.epochs // 2:
+            for p in model.encoder.parameters():
+                p.requires_grad = True
+            optimizer = optim.Adam(model.parameters(), lr=args.lr * 0.1, weight_decay=1e-4)
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs - epoch)
+            print("  Unfroze encoder for fine-tuning")
+
+        model.train()
+        train_loss = 0.0
+        for batch in tqdm(train_loader, desc=f"[UNet] Epoch {epoch+1}/{args.epochs}"):
+            imgs  = batch["image"].to(device)
+            masks = batch["segmentation_mask"].to(device)
+            optimizer.zero_grad()
+            logits = model(imgs)
+            loss   = ce_fn(logits, masks)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+        scheduler.step()
+
+        val_loss, val_dice = _eval_unet(model, val_loader, ce_fn, device)
+        print(f"  Epoch {epoch+1}: train_loss={train_loss/len(train_loader):.4f} | val_loss={val_loss:.4f} val_dice={val_dice:.4f}")
+        wandb.log({"epoch": epoch+1, "seg/train_loss": train_loss/len(train_loader),
+                   "seg/val_loss": val_loss, "seg/val_dice": val_dice})
+
+        if val_dice > best_val_dice:
+            best_val_dice = val_dice
+            torch.save(model.state_dict(), "checkpoints/unet.pth")
+            print(f"  Saved unet.pth (val_dice={val_dice:.4f})")
+
+    print(f"Best unet val_dice: {best_val_dice:.4f}")
+
+
+def _eval_unet(model, loader, ce_fn, device):
+    model.eval()
+    total_loss, total_dice, n = 0.0, 0.0, 0
+    with torch.no_grad():
+        for batch in loader:
+            imgs  = batch["image"].to(device)
+            masks = batch["segmentation_mask"].to(device)
+            logits = model(imgs)
+            total_loss += ce_fn(logits, masks).item()
+            preds = logits.argmax(1)
+            for cls in range(3):
+                tp = ((preds == cls) & (masks == cls)).sum().float()
+                fp = ((preds == cls) & (masks != cls)).sum().float()
+                fn = ((preds != cls) & (masks == cls)).sum().float()
+                total_dice += (2 * tp / (2 * tp + fp + fn + 1e-6)).item()
+            n += 1
+    return total_loss / len(loader), total_dice / (n * 3)
+
+
+# ──────────────────────────────────────────────────────────────
+# Main
+# ──────────────────────────────────────────────────────────────
 
 def main(args):
-    wandb.init(project="DA6401-Assignment2", name=args.run_name, config=args)
+    os.makedirs("checkpoints", exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # Dataset
-    train_dataset = OxfordIIITPetDataset(root="./data", split="trainval", download=True)
-    val_dataset = OxfordIIITPetDataset(root="./data", split="test", download=True)
-    
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2)
-    
-    # Model Setup
-    model = MultiTaskPerceptionModel().to(device)
-    
-    # Optional logic for fine-tuning experiment
-    if args.fine_tune_strategy == "strict":
-        for param in model.encoder.parameters():
-            param.requires_grad = False
-    elif args.fine_tune_strategy == "partial":
-        for name, param in model.encoder.named_parameters():
-            if "block5" in name or "block4" in name:
-                param.requires_grad = True # unfreeze later
-            else:
-                param.requires_grad = False
-                
-    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
-    
-    for epoch in range(args.epochs):
-        train_loss = train_epoch(model, train_loader, optimizer, {}, device)
-        val_loss = validate_epoch(model, val_loader, device)
-        print(f"Epoch {epoch+1}/{args.epochs} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
-        wandb.log({"epoch": epoch, "train_epoch_loss": train_loss, "val_epoch_loss": val_loss})
-        
-        # Save full multitask checkpoint
-        torch.save(model.state_dict(), f"checkpoints/{args.run_name}_latest.pth")
+    print(f"Device: {device}")
 
-    # Save individual checkpoints for submission
-    save_individual_checkpoints(model, save_dir="checkpoints")
+    wandb.init(project="DA6401-Assignment2", name=args.run_name, config=vars(args))
+
+    if args.task in ("classifier", "all"):
+        print("\n=== Training Classifier ===")
+        train_classifier(args, device)
+
+    if args.task in ("localizer", "all"):
+        print("\n=== Training Localizer ===")
+        train_localizer(args, device)
+
+    if args.task in ("unet", "all"):
+        print("\n=== Training U-Net ===")
+        train_unet(args, device)
+
+    wandb.finish()
+    print("\nDone. Checkpoints saved to checkpoints/")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--run_name", type=str, default="baseline")
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--dropout_p", type=float, default=0.5)
-    parser.add_argument("--fine_tune_strategy", type=str, choices=["none", "strict", "partial", "full"], default="none")
+    parser.add_argument("--task",       type=str, default="all",
+                        choices=["classifier", "localizer", "unet", "all"],
+                        help="Which model to train")
+    parser.add_argument("--run_name",   type=str, default="full_pipeline")
+    parser.add_argument("--epochs",     type=int, default=25)
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--lr",         type=float, default=1e-4)
+    parser.add_argument("--dropout_p",  type=float, default=0.5)
     args = parser.parse_args()
-    
-    os.makedirs("checkpoints", exist_ok=True)
     main(args)
