@@ -2,6 +2,7 @@
 """
 
 import os
+import sys
 import io
 import glob
 import torch
@@ -12,25 +13,73 @@ from models.localization import VGG11Localizer
 from models.segmentation import VGG11UNet
 
 
+def _log(msg):
+    print(f"[CKPT] {msg}", file=sys.stderr, flush=True)
+
+
+def _find_checkpoint_dir():
+    """Search multiple candidate locations for the checkpoints directory."""
+    candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkpoints"),
+        "/autograder/source/checkpoints",
+        "/autograder/submission/checkpoints",
+        os.path.join(os.getcwd(), "checkpoints"),
+    ]
+    for d in candidates:
+        if os.path.isdir(d):
+            contents = os.listdir(d)
+            _log(f"Found dir {d} -> {contents}")
+            # Check if it has actual checkpoint data (not just metadata)
+            if any(f.endswith('.pth') or '.part_' in f for f in contents):
+                return d
+        else:
+            _log(f"Not found: {d}")
+    # Fall back to first candidate
+    _log(f"Falling back to {candidates[0]}")
+    return candidates[0]
+
+
 def _load_checkpoint(path):
-    """Load a checkpoint, handling split files and fp16→fp32 conversion."""
+    """Load a checkpoint, handling split files and fp16->fp32 conversion."""
+    _log(f"Loading: {path}")
+
     # Check for split parts first (e.g. classifier.pth.part_aa, part_ab, ...)
     parts = sorted(glob.glob(path + ".part_*"))
+    _log(f"  Split parts found: {len(parts)} {parts}")
+
     if parts:
         buf = bytearray()
         for p in parts:
+            sz = os.path.getsize(p)
+            _log(f"  Reading part {os.path.basename(p)} ({sz} bytes)")
             with open(p, "rb") as f:
                 buf.extend(f.read())
+        _log(f"  Total buffer: {len(buf)} bytes")
         sd = torch.load(io.BytesIO(buf), map_location="cpu", weights_only=False)
-    elif os.path.exists(path) and os.path.getsize(path) > 1024:
-        sd = torch.load(path, map_location="cpu", weights_only=False)
+    elif os.path.exists(path):
+        sz = os.path.getsize(path)
+        _log(f"  Single file exists: {sz} bytes")
+        if sz > 1024:
+            sd = torch.load(path, map_location="cpu", weights_only=False)
+        else:
+            _log(f"  TOO SMALL ({sz} bytes) - likely LFS pointer, skipping")
+            return None
     else:
+        _log(f"  FILE NOT FOUND: {path}")
+        parent = os.path.dirname(path)
+        if os.path.isdir(parent):
+            _log(f"  Dir contents: {os.listdir(parent)}")
+        else:
+            _log(f"  Parent dir doesn't exist: {parent}")
         return None
 
     # Convert fp16 tensors back to fp32
+    fp16_count = 0
     for k in sd:
         if isinstance(sd[k], torch.Tensor) and sd[k].dtype == torch.float16:
             sd[k] = sd[k].float()
+            fp16_count += 1
+    _log(f"  Loaded {len(sd)} keys, converted {fp16_count} fp16->fp32")
     return sd
 
 
@@ -43,14 +92,16 @@ class MultiTaskPerceptionModel(nn.Module):
                  unet_path: str = None):
         super().__init__()
 
-        # Resolve paths relative to THIS file, not the CWD
-        _here = os.path.dirname(os.path.abspath(__file__))
+        # Find checkpoints directory
+        ckpt_dir = _find_checkpoint_dir()
+        _log(f"Using checkpoint dir: {ckpt_dir}")
+
         if classifier_path is None:
-            classifier_path = os.path.join(_here, "checkpoints", "classifier.pth")
+            classifier_path = os.path.join(ckpt_dir, "classifier.pth")
         if localizer_path is None:
-            localizer_path = os.path.join(_here, "checkpoints", "localizer.pth")
+            localizer_path = os.path.join(ckpt_dir, "localizer.pth")
         if unet_path is None:
-            unet_path = os.path.join(_here, "checkpoints", "unet.pth")
+            unet_path = os.path.join(ckpt_dir, "unet.pth")
 
         self.encoder = VGG11(in_channels=in_channels)
 
@@ -58,17 +109,35 @@ class MultiTaskPerceptionModel(nn.Module):
         localizer = VGG11Localizer(in_channels=in_channels)
         unet = VGG11UNet(num_classes=seg_classes, in_channels=in_channels)
 
-        cls_sd = _load_checkpoint(classifier_path)
-        if cls_sd is not None:
-            classifier.load_state_dict(cls_sd)
+        try:
+            cls_sd = _load_checkpoint(classifier_path)
+            if cls_sd is not None:
+                classifier.load_state_dict(cls_sd)
+                _log("Classifier loaded OK")
+            else:
+                _log("WARNING: Classifier checkpoint not loaded")
+        except Exception as e:
+            _log(f"ERROR loading classifier: {e}")
 
-        loc_sd = _load_checkpoint(localizer_path)
-        if loc_sd is not None:
-            localizer.load_state_dict(loc_sd)
+        try:
+            loc_sd = _load_checkpoint(localizer_path)
+            if loc_sd is not None:
+                localizer.load_state_dict(loc_sd)
+                _log("Localizer loaded OK")
+            else:
+                _log("WARNING: Localizer checkpoint not loaded")
+        except Exception as e:
+            _log(f"ERROR loading localizer: {e}")
 
-        unet_sd = _load_checkpoint(unet_path)
-        if unet_sd is not None:
-            unet.load_state_dict(unet_sd)
+        try:
+            unet_sd = _load_checkpoint(unet_path)
+            if unet_sd is not None:
+                unet.load_state_dict(unet_sd)
+                _log("UNet loaded OK")
+            else:
+                _log("WARNING: UNet checkpoint not loaded")
+        except Exception as e:
+            _log(f"ERROR loading unet: {e}")
 
         # Shared backbone from classifier
         try:
