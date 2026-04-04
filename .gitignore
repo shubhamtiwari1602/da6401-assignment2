@@ -5,7 +5,7 @@
 *.zip
 *.tar
 
-# checkpoints/*.pth  # tracked via Git LFS instead
+# Checkpoints are committed as regular files (fp16, split if >95MB)
 
 # Python cache
 __pycache__/

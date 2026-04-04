@@ -2,12 +2,36 @@
 """
 
 import os
+import io
+import glob
 import torch
 import torch.nn as nn
 from models.vgg11 import VGG11
 from models.classification import VGG11Classifier
 from models.localization import VGG11Localizer
 from models.segmentation import VGG11UNet
+
+
+def _load_checkpoint(path):
+    """Load a checkpoint, handling split files and fp16→fp32 conversion."""
+    # Check for split parts first (e.g. classifier.pth.part_aa, part_ab, ...)
+    parts = sorted(glob.glob(path + ".part_*"))
+    if parts:
+        buf = bytearray()
+        for p in parts:
+            with open(p, "rb") as f:
+                buf.extend(f.read())
+        sd = torch.load(io.BytesIO(buf), map_location="cpu", weights_only=False)
+    elif os.path.exists(path) and os.path.getsize(path) > 1024:
+        sd = torch.load(path, map_location="cpu", weights_only=False)
+    else:
+        return None
+
+    # Convert fp16 tensors back to fp32
+    for k in sd:
+        if isinstance(sd[k], torch.Tensor) and sd[k].dtype == torch.float16:
+            sd[k] = sd[k].float()
+    return sd
 
 
 class MultiTaskPerceptionModel(nn.Module):
@@ -28,41 +52,23 @@ class MultiTaskPerceptionModel(nn.Module):
         if unet_path is None:
             unet_path = os.path.join(_here, "checkpoints", "unet.pth")
 
-        # If a file is missing or is a tiny LFS pointer (<1KB), try gdown
-        def _needs_download(p):
-            return not os.path.exists(p) or os.path.getsize(p) < 1024
-
-        try:
-            import gdown
-            _ids = {
-                classifier_path: "1sDZTJ3SVxFUqVxVgXCPzajSEQwVeViKx",
-                localizer_path:  "151gfnQk97XDx6KJ0wtPkDCOZkAF1Se7r",
-                unet_path:       "14JQvAPxmd9-UeWKcE6vskYfIfUh5y47L",
-            }
-            for p, drive_id in _ids.items():
-                if _needs_download(p):
-                    gdown.download(id=drive_id, output=p, quiet=False)
-        except Exception:
-            pass
-
         self.encoder = VGG11(in_channels=in_channels)
 
         classifier = VGG11Classifier(num_classes=num_breeds, in_channels=in_channels)
         localizer = VGG11Localizer(in_channels=in_channels)
         unet = VGG11UNet(num_classes=seg_classes, in_channels=in_channels)
 
-        def _safe_load(model, path):
-            try:
-                if os.path.exists(path) and os.path.getsize(path) > 1024:
-                    model.load_state_dict(
-                        torch.load(path, map_location="cpu", weights_only=False)
-                    )
-            except Exception:
-                pass
+        cls_sd = _load_checkpoint(classifier_path)
+        if cls_sd is not None:
+            classifier.load_state_dict(cls_sd)
 
-        _safe_load(classifier, classifier_path)
-        _safe_load(localizer, localizer_path)
-        _safe_load(unet, unet_path)
+        loc_sd = _load_checkpoint(localizer_path)
+        if loc_sd is not None:
+            localizer.load_state_dict(loc_sd)
+
+        unet_sd = _load_checkpoint(unet_path)
+        if unet_sd is not None:
+            unet.load_state_dict(unet_sd)
 
         # Shared backbone from classifier
         try:
