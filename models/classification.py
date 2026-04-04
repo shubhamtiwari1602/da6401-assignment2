@@ -15,18 +15,18 @@ class VGG11Classifier(nn.Module):
         
         self.encoder = VGG11(in_channels=in_channels)
         
-        # Adaptive pooling to ensure 7x7 spatial size before flattening
-        self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
-        
-        # VGG-style classifier head
+        # Global Average Pooling: collapses spatial dims to 1x1
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+
+        # Lightweight head: 512-dim GAP vector -> logits
         self.classifier = nn.Sequential(
-            nn.Linear(512 * 7 * 7, 4096),
+            nn.Linear(512, 512),
             nn.ReLU(inplace=True),
             CustomDropout(p=dropout_p),
-            nn.Linear(4096, 4096),
+            nn.Linear(512, 512),
             nn.ReLU(inplace=True),
             CustomDropout(p=dropout_p),
-            nn.Linear(4096, num_classes)
+            nn.Linear(512, num_classes)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -35,7 +35,7 @@ class VGG11Classifier(nn.Module):
             Classification logits [B, num_classes].
         """
         x = self.encoder(x, return_features=False)
-        x = self.avgpool(x)
-        x = torch.flatten(x, 1)
+        x = self.avgpool(x)      # [B, 512, 1, 1]
+        x = torch.flatten(x, 1)  # [B, 512]
         x = self.classifier(x)
         return x

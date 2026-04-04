@@ -13,16 +13,17 @@ class VGG11Localizer(nn.Module):
         from .layers import CustomDropout
         self.encoder = VGG11(in_channels=in_channels)
         
-        self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
-        
-        # Regression head for 4 coordinates
+        # Global Average Pooling
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+
+        # Regression head: 512-dim GAP vector -> 4 box coords
         self.regressor = nn.Sequential(
-            nn.Linear(512 * 7 * 7, 1024),
+            nn.Linear(512, 256),
             nn.ReLU(inplace=True),
-            nn.Linear(1024, 512),
+            nn.Linear(256, 64),
             nn.ReLU(inplace=True),
-            nn.Linear(512, 4),
-            nn.Sigmoid() # Scale outputs to [0, 1] for normalized box coordinates
+            nn.Linear(64, 4),
+            nn.Sigmoid()  # Scale outputs to [0, 1]
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -31,7 +32,7 @@ class VGG11Localizer(nn.Module):
             Bounding box coordinates [B, 4] in (x_center, y_center, width, height) format.
         """
         x = self.encoder(x, return_features=False)
-        x = self.avgpool(x)
-        x = torch.flatten(x, 1)
-        x = self.regressor(x)
+        x = self.avgpool(x)      # [B, 512, 1, 1]
+        x = torch.flatten(x, 1)  # [B, 512]
+        x = self.regressor(x)    # [B, 4] in [0, 1]
         return x * 224.0

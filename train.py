@@ -9,6 +9,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import wandb
+import torchvision.transforms as T
 
 from models.classification import VGG11Classifier
 from models.localization import VGG11Localizer
@@ -17,13 +18,41 @@ from losses.iou_loss import IoULoss
 from data.pets_dataset import OxfordIIITPetDataset
 
 
+# Standard ImageNet stats
+_MEAN = [0.485, 0.456, 0.406]
+_STD  = [0.229, 0.224, 0.225]
+
+# Training transform: augmentation to reduce overfitting
+TRAIN_TRANSFORM = T.Compose([
+    T.Resize((256, 256)),
+    T.RandomCrop(224),
+    T.RandomHorizontalFlip(),
+    T.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2, hue=0.05),
+    T.ToTensor(),
+    T.Normalize(mean=_MEAN, std=_STD),
+])
+
+# Validation/test transform: no augmentation
+VAL_TRANSFORM = T.Compose([
+    T.Resize((224, 224)),
+    T.ToTensor(),
+    T.Normalize(mean=_MEAN, std=_STD),
+])
+
+
+def save_fp16(state_dict, path):
+    """Save state dict in float16 to keep file size small (~half of fp32)."""
+    fp16_sd = {k: (v.half() if v.is_floating_point() else v) for k, v in state_dict.items()}
+    torch.save(fp16_sd, path)
+
+
 # ──────────────────────────────────────────────────────────────
 # Classifier
 # ──────────────────────────────────────────────────────────────
 
 def train_classifier(args, device):
-    train_ds = OxfordIIITPetDataset(root="./data", split="trainval", download=True)
-    val_ds   = OxfordIIITPetDataset(root="./data", split="test",     download=True)
+    train_ds = OxfordIIITPetDataset(root="./data", split="trainval", download=True, transform=TRAIN_TRANSFORM)
+    val_ds   = OxfordIIITPetDataset(root="./data", split="test",     download=True, transform=VAL_TRANSFORM)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=2, pin_memory=True)
     val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
 
@@ -57,8 +86,8 @@ def train_classifier(args, device):
 
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            torch.save(model.state_dict(), "checkpoints/classifier.pth")
-            print(f"  Saved classifier.pth (val_acc={val_acc:.4f})")
+            save_fp16(model.state_dict(), "checkpoints/classifier.pth")
+            print(f"  Saved classifier.pth fp16 (val_acc={val_acc:.4f})")
 
     print(f"Best classifier val_acc: {best_val_acc:.4f}")
 
@@ -82,8 +111,8 @@ def _eval_classifier(model, loader, loss_fn, device):
 # ──────────────────────────────────────────────────────────────
 
 def train_localizer(args, device):
-    train_ds = OxfordIIITPetDataset(root="./data", split="trainval", download=True)
-    val_ds   = OxfordIIITPetDataset(root="./data", split="test",     download=True)
+    train_ds = OxfordIIITPetDataset(root="./data", split="trainval", download=True, transform=TRAIN_TRANSFORM)
+    val_ds   = OxfordIIITPetDataset(root="./data", split="test",     download=True, transform=VAL_TRANSFORM)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=2, pin_memory=True)
     val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
 
@@ -135,8 +164,8 @@ def train_localizer(args, device):
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), "checkpoints/localizer.pth")
-            print(f"  Saved localizer.pth (val_loss={val_loss:.4f})")
+            save_fp16(model.state_dict(), "checkpoints/localizer.pth")
+            print(f"  Saved localizer.pth fp16 (val_loss={val_loss:.4f})")
 
     print(f"Best localizer val_loss: {best_val_loss:.4f}")
 
@@ -158,8 +187,8 @@ def _eval_localizer(model, loader, mse_fn, iou_fn, device):
 # ──────────────────────────────────────────────────────────────
 
 def train_unet(args, device):
-    train_ds = OxfordIIITPetDataset(root="./data", split="trainval", download=True)
-    val_ds   = OxfordIIITPetDataset(root="./data", split="test",     download=True)
+    train_ds = OxfordIIITPetDataset(root="./data", split="trainval", download=True, transform=TRAIN_TRANSFORM)
+    val_ds   = OxfordIIITPetDataset(root="./data", split="test",     download=True, transform=VAL_TRANSFORM)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=2, pin_memory=True)
     val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
 
@@ -209,8 +238,8 @@ def train_unet(args, device):
 
         if val_dice > best_val_dice:
             best_val_dice = val_dice
-            torch.save(model.state_dict(), "checkpoints/unet.pth")
-            print(f"  Saved unet.pth (val_dice={val_dice:.4f})")
+            save_fp16(model.state_dict(), "checkpoints/unet.pth")
+            print(f"  Saved unet.pth fp16 (val_dice={val_dice:.4f})")
 
     print(f"Best unet val_dice: {best_val_dice:.4f}")
 
@@ -267,7 +296,7 @@ if __name__ == "__main__":
                         choices=["classifier", "localizer", "unet", "all"],
                         help="Which model to train")
     parser.add_argument("--run_name",   type=str, default="full_pipeline")
-    parser.add_argument("--epochs",     type=int, default=25)
+    parser.add_argument("--epochs",     type=int, default=30)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--lr",         type=float, default=1e-4)
     parser.add_argument("--dropout_p",  type=float, default=0.5)
