@@ -13,13 +13,23 @@ from models.segmentation import VGG11UNet
 class MultiTaskPerceptionModel(nn.Module):
     """Shared-backbone multi-task model."""
 
-    def __init__(self, num_breeds: int = 37, seg_classes: int = 3, in_channels: int = 3, 
-                 classifier_path: str = "classifier.pth", 
-                 localizer_path: str = "localizer.pth", 
+    def __init__(self, num_breeds: int = 37, seg_classes: int = 3, in_channels: int = 3,
+                 classifier_path: str = "classifier.pth",
+                 localizer_path: str = "localizer.pth",
                  unet_path: str = "unet.pth"):
         """
         Initialize the shared backbone/heads using these trained weights.
         """
+        import gdown
+        _ids = {
+            classifier_path: "<CLASSIFIER_DRIVE_ID>",
+            localizer_path:  "<LOCALIZER_DRIVE_ID>",
+            unet_path:       "<UNET_DRIVE_ID>",
+        }
+        for path, drive_id in _ids.items():
+            if not os.path.exists(path) and not drive_id.startswith("<"):
+                gdown.download(id=drive_id, output=path, quiet=False)
+
         super().__init__()
         
         self.encoder = VGG11(in_channels=in_channels)

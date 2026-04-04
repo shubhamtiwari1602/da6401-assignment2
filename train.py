@@ -82,6 +82,45 @@ def validate_epoch(model, dataloader, device):
             
     return running_loss / len(dataloader)
 
+def save_individual_checkpoints(model, save_dir="checkpoints"):
+    """Extract and save individual model checkpoints from a trained multitask model.
+
+    Remaps multitask state-dict keys to match the standalone model formats
+    expected by VGG11Classifier, VGG11Localizer, and VGG11UNet.
+    """
+    sd = model.state_dict()
+
+    cls_sd = {}
+    for k, v in sd.items():
+        if k.startswith("encoder."):
+            cls_sd[k] = v
+        elif k.startswith("cls_pool."):
+            cls_sd[k.replace("cls_pool.", "avgpool.")] = v
+        elif k.startswith("cls_head."):
+            cls_sd[k.replace("cls_head.", "classifier.")] = v
+    torch.save(cls_sd, os.path.join(save_dir, "classifier.pth"))
+
+    loc_sd = {}
+    for k, v in sd.items():
+        if k.startswith("encoder."):
+            loc_sd[k] = v
+        elif k.startswith("loc_pool."):
+            loc_sd[k.replace("loc_pool.", "avgpool.")] = v
+        elif k.startswith("loc_head."):
+            loc_sd[k.replace("loc_head.", "regressor.")] = v
+    torch.save(loc_sd, os.path.join(save_dir, "localizer.pth"))
+
+    unet_sd = {}
+    for k, v in sd.items():
+        if k.startswith("encoder.") or k.startswith("upconv") or k.startswith("dec"):
+            unet_sd[k] = v
+        elif k.startswith("seg_final."):
+            unet_sd[k.replace("seg_final.", "final_conv.")] = v
+    torch.save(unet_sd, os.path.join(save_dir, "unet.pth"))
+
+    print(f"Individual checkpoints saved to {save_dir}/")
+
+
 def main(args):
     wandb.init(project="DA6401-Assignment2", name=args.run_name, config=args)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -115,8 +154,11 @@ def main(args):
         print(f"Epoch {epoch+1}/{args.epochs} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
         wandb.log({"epoch": epoch, "train_epoch_loss": train_loss, "val_epoch_loss": val_loss})
         
-        # Save checkpoint
+        # Save full multitask checkpoint
         torch.save(model.state_dict(), f"checkpoints/{args.run_name}_latest.pth")
+
+    # Save individual checkpoints for submission
+    save_individual_checkpoints(model, save_dir="checkpoints")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

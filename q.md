@@ -125,7 +125,7 @@ Pass a single image of a dog through your trained classification model from Task
 ## 2.5 Object Detection: Confidence & IoU (5 Marks)
 
 Log a table in W&B containing at least 10 test images from the Pet dataset with bounding box predictions overlaid. Color code the boxes: Green for Ground Truth, Red for Predictions. Display the Confidence Score and the calculated Intersection over Union (IoU) for each predicted box in the table. Identify a failure case (an image with high confidence but low IoU, or a completely missed object). What aspects of the image (occlusion, scale, complex background) confused the model?
-
+In assignment 2, for Q2.5, provide samples from your validation set as the test annotations for the bounding boxes are missing the dataset.
 4
 
 ---
@@ -149,3 +149,76 @@ Conclude your report with a comprehensive meta-analysis of your unified multi-ta
     3.  **Loss Formulation (Revisiting Tasks 3):** Evaluate the effectiveness of your chosen segmentation loss.
 
 3
+
+
+*ASSIGNMENT 2 – SUBMISSION GUIDELINES*
+
+Follow the steps below carefully:
+
+*Step 1 – Google Drive Setup*
+Create a new folder in your Google Drive and upload all 3 model checkpoints to it:
+• classifier.pth
+• localizer.pth
+• unet.pth
+
+*Step 2 – Get Drive IDs*
+For each .pth file:
+1. Click the three dots (More actions) next to the file
+2. Click Share → Share
+3. Set access to *Anyone with the link*
+4. Copy the link and extract the ID
+
+Example:
+Link → https://drive.google.com/file/d/1t2EgeJ3TaYFSBQoC9o0ojd8Nn52XzV0i/view?usp=sharing
+ID → `1t2EgeJ3TaYFSBQoC9o0ojd8Nn52XzV0i`
+
+*Step 3 – Update Your Code*
+Paste these 4 lines at the *start* of the `init()` function inside `MultiTaskPerceptionModel`:
+
+```
+import gdown
+gdown.download(id="<classifier.pth drive id>", output=classifier_path, quiet=False)
+gdown.download(id="<localizer.pth drive id>", output=localizer_path, quiet=False)
+gdown.download(id="<unet.pth drive id>", output=unet_path, quiet=False)
+```
+
+Replace each `<...drive id>` with the actual IDs from Step 2.
+
+*Step 4 – Clean Up Locally*
+Delete all 3 .pth files from your local `/checkpoints` folder.
+
+*Step 5 – Push to GitHub*
+Push the current project to GitHub. Make sure *no .pth files* are included.
+
+*Step 6 – Verify Project Structure*
+Your final project should look like this:
+```
+.
+├── checkpoints
+│   └── checkpoints.md
+├── data
+│   └── pets_dataset.py
+├── inference.py
+├── losses
+│   ├── __init__.py
+│   └── iou_loss.py
+├── models
+│   ├── classification.py
+│   ├── __init__.py
+│   ├── layers.py
+│   ├── localization.py
+│   ├── multitask.py
+│   ├── segmentation.py
+│   └── vgg11.py
+├── README.md
+├── requirements.txt
+└── train.py
+```
+
+*Step 7 – README*
+Make sure your README includes: *Public* WandB report link and GitHub repo link
+
+*Step 8 – Submit*
+Zip the project and submit on *Gradescope*.
+
+⚠️ *Do NOT delete the above created drive foolder till assignment2 marks are released.*

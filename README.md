@@ -1,11 +1,12 @@
-# DA6401 Assignment-2 Skeleton Guide
+# DA6401 Assignment 2 — Visual Perception Pipeline
 
-This repository is an instructional skeleton for building the complete visual perception pipeline on Oxford-IIIT Pet.
+Multi-stage visual perception pipeline on the Oxford-IIIT Pet Dataset using PyTorch.
+Implements VGG11 classification, object localization, U-Net segmentation, and a unified multi-task model.
 
-## Contact
+## W&B Report
 
-For questions or issues, please contact the teaching staff or post on the course forum.
+**Public W&B Report:** https://wandb.ai/me22b196-indian-institute-of-technology-madras/DA6401-Assignment2
 
----
+## GitHub Repository
 
-Good luck with your implementation!
+**GitHub Repo:** https://github.com/shubhamtiwari1602/da6401-assignment2

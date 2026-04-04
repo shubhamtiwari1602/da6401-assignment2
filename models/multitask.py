@@ -9,10 +9,10 @@ class MultiTaskPerceptionModel(nn.Module):
 
     def __init__(self, num_breeds: int = 37, seg_classes: int = 3, in_channels: int = 3, dropout_p: float = 0.5):
         super().__init__()
-        from .vgg11 import VGG11Encoder
+        from .vgg11 import VGG11
         from .layers import CustomDropout
         
-        self.encoder = VGG11Encoder(in_channels=in_channels)
+        self.encoder = VGG11(in_channels=in_channels)
         
         self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
         
