@@ -5,7 +5,7 @@
 *.zip
 *.tar
 
-checkpoints/*.pth
+# checkpoints/*.pth  # tracked via Git LFS instead
 
 # Python cache
 __pycache__/
