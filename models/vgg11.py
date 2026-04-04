@@ -98,5 +98,9 @@ class VGG11(nn.Module):
                 "f5": f5
             }
             return bottleneck, feature_dict
-        
+
         return bottleneck
+
+
+# Alias so autograder can do: from models.vgg11 import VGG11Encoder
+VGG11Encoder = VGG11
