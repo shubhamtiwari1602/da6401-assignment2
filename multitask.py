@@ -2,9 +2,6 @@
 """
 
 import os
-import sys
-import glob
-import urllib.request
 import torch
 import torch.nn as nn
 from models.vgg11 import VGG11
@@ -12,58 +9,25 @@ from models.classification import VGG11Classifier
 from models.localization import VGG11Localizer
 from models.segmentation import VGG11UNet
 
-_RELEASE_BASE = (
-    "https://github.com/shubhamtiwari1602/da6401-assignment2"
-    "/releases/download/v1.0"
-)
-
-
-def _download_checkpoint(name: str, dest_path: str) -> bool:
-    """Download a checkpoint from GitHub Releases into dest_path."""
-    url = f"{_RELEASE_BASE}/{name}"
-    print(f"[CKPT] Downloading {url} ...", flush=True)
-    try:
-        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-        urllib.request.urlretrieve(url, dest_path)
-        size = os.path.getsize(dest_path)
-        print(f"[CKPT] Downloaded {size} bytes -> {dest_path}", flush=True)
-        return size > 1024
-    except Exception as e:
-        print(f"[CKPT] Download failed: {e}", flush=True)
-        return False
-
 
 def _load_checkpoint(path):
-    """Load a state dict from a .pth file, downloading from Releases if missing."""
-    print(f"[CKPT] Trying: {path}", flush=True)
-
+    """Load a state dict from a .pth file, converting fp16 tensors to fp32."""
     if not os.path.exists(path) or os.path.getsize(path) < 1024:
-        name = os.path.basename(path)
-        ok = _download_checkpoint(name, path)
-        if not ok:
-            print(f"[CKPT] Could not obtain {name} — using random weights", flush=True)
-            return None
-
-    size = os.path.getsize(path)
-    print(f"[CKPT] Found: {size} bytes", flush=True)
-    if size < 1024:
-        print("[CKPT] TOO SMALL — likely an LFS pointer, skipping", flush=True)
+        print(f"[CKPT] Not found or too small: {path}", flush=True)
         return None
 
     sd = torch.load(path, map_location="cpu", weights_only=False)
 
     # Convert fp16 → fp32
-    fp16 = 0
     for k in sd:
         if isinstance(sd[k], torch.Tensor) and sd[k].dtype == torch.float16:
             sd[k] = sd[k].float()
-            fp16 += 1
-    print(f"[CKPT] Loaded {len(sd)} keys, {fp16} fp16->fp32 conversions", flush=True)
+    print(f"[CKPT] Loaded {len(sd)} keys from {os.path.basename(path)}", flush=True)
     return sd
 
 
 class MultiTaskPerceptionModel(nn.Module):
-    """Shared-backbone multi-task model (GAP-based heads, ~20MB checkpoints)."""
+    """Shared-backbone multi-task model."""
 
     def __init__(self, num_breeds: int = 37, seg_classes: int = 3, in_channels: int = 3,
                  classifier_path: str = None,
@@ -71,14 +35,20 @@ class MultiTaskPerceptionModel(nn.Module):
                  unet_path: str = None):
         super().__init__()
 
-        # Resolve checkpoint paths relative to this file
-        _here = os.path.dirname(os.path.abspath(__file__))
+        # Default relative paths (autograder runs from repo root)
         if classifier_path is None:
-            classifier_path = os.path.join(_here, "checkpoints", "classifier.pth")
+            classifier_path = "checkpoints/classifier.pth"
         if localizer_path is None:
-            localizer_path = os.path.join(_here, "checkpoints", "localizer.pth")
+            localizer_path = "checkpoints/localizer.pth"
         if unet_path is None:
-            unet_path = os.path.join(_here, "checkpoints", "unet.pth")
+            unet_path = "checkpoints/unet.pth"
+
+        # Download checkpoints from Google Drive
+        import gdown
+        os.makedirs("checkpoints", exist_ok=True)
+        gdown.download(id="1sDZTJ3SVxFUqVxVgXCPzajSEQwVeViKx", output=classifier_path, quiet=False)
+        gdown.download(id="151gfnQk97XDx6KJ0wtPkDCOZkAF1Se7r", output=localizer_path, quiet=False)
+        gdown.download(id="14JQvAPxmd9-UeWKcE6vskYfIfUh5y47L", output=unet_path, quiet=False)
 
         # Build component models
         classifier = VGG11Classifier(num_classes=num_breeds, in_channels=in_channels)
@@ -100,17 +70,17 @@ class MultiTaskPerceptionModel(nn.Module):
             unet.load_state_dict(unet_sd)
             print("[CKPT] UNet weights loaded", flush=True)
 
-        # Shared encoder (take weights from the trained classifier)
+        # Shared encoder (from trained classifier)
         self.encoder = classifier.encoder
 
-        # Classification Head (GAP + head)
-        self.cls_pool = classifier.avgpool       # AdaptiveAvgPool2d(1,1)
-        self.cls_head = classifier.classifier    # Linear(512, ...)
+        # Classification head (GAP + linear)
+        self.cls_pool = classifier.avgpool
+        self.cls_head = classifier.classifier
 
-        # Localization Head (same GAP pool → share with cls)
-        self.loc_head = localizer.regressor      # Linear(512, ...) -> Sigmoid
+        # Localization head
+        self.loc_head = localizer.regressor
 
-        # Segmentation Decoder
+        # Segmentation decoder
         self.upconv1  = unet.upconv1
         self.dec1     = unet.dec1
         self.upconv2  = unet.upconv2
@@ -127,14 +97,14 @@ class MultiTaskPerceptionModel(nn.Module):
         # Shared encoder
         bottleneck, f = self.encoder(x, return_features=True)
 
-        # GAP → 512-dim feature vector (shared by cls + loc heads)
+        # GAP → 512-dim feature vector
         p = self.cls_pool(bottleneck)   # [B, 512, 1, 1]
         p = torch.flatten(p, 1)         # [B, 512]
 
         cls_logits = self.cls_head(p)
         loc_coords = self.loc_head(p) * 224.0
 
-        # Segmentation decoder (skip connections)
+        # Segmentation decoder with skip connections
         d = self.dec1(torch.cat([self.upconv1(bottleneck), f["f5"]], dim=1))
         d = self.dec2(torch.cat([self.upconv2(d), f["f4"]], dim=1))
         d = self.dec3(torch.cat([self.upconv3(d), f["f3"]], dim=1))
