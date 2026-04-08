@@ -31,11 +31,11 @@ os.makedirs("checkpoints", exist_ok=True)
 os.environ["WANDB_MODE"] = "offline"
 
 # ── Training ───────────────────────────────────────────────────────────────
-nw = 2 if torch.cuda.is_available() else 0
+# num_workers=0 avoids "storage not resizable" bug with pin_memory in this Kaggle env
 tasks = [
-    f"{sys.executable} train.py --task classifier --epochs 30 --batch_size 64 --lr 3e-4 --run_name cls_v1 --num_workers {nw}",
-    f"{sys.executable} train.py --task localizer  --epochs 30 --batch_size 64 --lr 3e-4 --run_name loc_v1 --num_workers {nw}",
-    f"{sys.executable} train.py --task unet       --epochs 30 --batch_size 32 --lr 3e-4 --run_name unet_v1 --num_workers {nw}",
+    f"{sys.executable} train.py --task classifier --epochs 30 --batch_size 64 --lr 3e-4 --run_name cls_v1 --num_workers 0",
+    f"{sys.executable} train.py --task localizer  --epochs 30 --batch_size 64 --lr 3e-4 --run_name loc_v1 --num_workers 0",
+    f"{sys.executable} train.py --task unet       --epochs 30 --batch_size 32 --lr 3e-4 --run_name unet_v1 --num_workers 0",
 ]
 for cmd in tasks:
     print(f"\n{'='*60}\n{cmd}\n{'='*60}", flush=True)
