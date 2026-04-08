@@ -53,8 +53,8 @@ def save_fp16(state_dict, path):
 def train_classifier(args, device):
     train_ds = OxfordIIITPetDataset(root="./data", split="trainval", download=True, transform=TRAIN_TRANSFORM)
     val_ds   = OxfordIIITPetDataset(root="./data", split="test",     download=True, transform=VAL_TRANSFORM)
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=2, pin_memory=True)
-    val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=args.num_workers, pin_memory=(args.num_workers > 0))
+    val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=(args.num_workers > 0))
 
     model = VGG11Classifier(num_classes=37, dropout_p=args.dropout_p).to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -113,8 +113,8 @@ def _eval_classifier(model, loader, loss_fn, device):
 def train_localizer(args, device):
     train_ds = OxfordIIITPetDataset(root="./data", split="trainval", download=True, transform=TRAIN_TRANSFORM)
     val_ds   = OxfordIIITPetDataset(root="./data", split="test",     download=True, transform=VAL_TRANSFORM)
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=2, pin_memory=True)
-    val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=args.num_workers, pin_memory=(args.num_workers > 0))
+    val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=(args.num_workers > 0))
 
     model = VGG11Localizer(dropout_p=args.dropout_p).to(device)
 
@@ -189,8 +189,8 @@ def _eval_localizer(model, loader, mse_fn, iou_fn, device):
 def train_unet(args, device):
     train_ds = OxfordIIITPetDataset(root="./data", split="trainval", download=True, transform=TRAIN_TRANSFORM)
     val_ds   = OxfordIIITPetDataset(root="./data", split="test",     download=True, transform=VAL_TRANSFORM)
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=2, pin_memory=True)
-    val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=args.num_workers, pin_memory=(args.num_workers > 0))
+    val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=(args.num_workers > 0))
 
     model = VGG11UNet(num_classes=3, dropout_p=args.dropout_p).to(device)
 
@@ -300,5 +300,6 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--lr",         type=float, default=1e-4)
     parser.add_argument("--dropout_p",  type=float, default=0.5)
+    parser.add_argument("--num_workers", type=int, default=2)
     args = parser.parse_args()
     main(args)
