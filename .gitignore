@@ -5,7 +5,8 @@
 *.zip
 *.tar
 
-# Checkpoints are committed as regular files (fp16, split if >95MB)
+# Checkpoints are hosted on GitHub Releases — downloaded at runtime, not committed
+checkpoints/*.pth
 
 # Python cache
 __pycache__/

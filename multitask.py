@@ -4,6 +4,7 @@
 import os
 import sys
 import glob
+import urllib.request
 import torch
 import torch.nn as nn
 from models.vgg11 import VGG11
@@ -11,18 +12,37 @@ from models.classification import VGG11Classifier
 from models.localization import VGG11Localizer
 from models.segmentation import VGG11UNet
 
+_RELEASE_BASE = (
+    "https://github.com/shubhamtiwari1602/da6401-assignment2"
+    "/releases/download/v1.0"
+)
+
+
+def _download_checkpoint(name: str, dest_path: str) -> bool:
+    """Download a checkpoint from GitHub Releases into dest_path."""
+    url = f"{_RELEASE_BASE}/{name}"
+    print(f"[CKPT] Downloading {url} ...", flush=True)
+    try:
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        urllib.request.urlretrieve(url, dest_path)
+        size = os.path.getsize(dest_path)
+        print(f"[CKPT] Downloaded {size} bytes -> {dest_path}", flush=True)
+        return size > 1024
+    except Exception as e:
+        print(f"[CKPT] Download failed: {e}", flush=True)
+        return False
+
 
 def _load_checkpoint(path):
-    """Load a state dict from a .pth file, converting fp16 tensors to fp32."""
+    """Load a state dict from a .pth file, downloading from Releases if missing."""
     print(f"[CKPT] Trying: {path}", flush=True)
 
-    if not os.path.exists(path):
-        ckpt_dir = os.path.dirname(path)
-        if os.path.isdir(ckpt_dir):
-            print(f"[CKPT] NOT FOUND. Dir contents: {os.listdir(ckpt_dir)}", flush=True)
-        else:
-            print(f"[CKPT] NOT FOUND. Dir missing: {ckpt_dir}", flush=True)
-        return None
+    if not os.path.exists(path) or os.path.getsize(path) < 1024:
+        name = os.path.basename(path)
+        ok = _download_checkpoint(name, path)
+        if not ok:
+            print(f"[CKPT] Could not obtain {name} — using random weights", flush=True)
+            return None
 
     size = os.path.getsize(path)
     print(f"[CKPT] Found: {size} bytes", flush=True)
