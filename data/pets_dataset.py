@@ -84,9 +84,8 @@ class OxfordIIITPetDataset(Dataset):
             # Nearest neighbor for trimap to avoid interpolating labels
             trimap_tr = T.Resize((224, 224), interpolation=T.InterpolationMode.NEAREST)(trimap.unsqueeze(0).float()).squeeze(0).long()
         else:
-            # Assumes albumentations format handled internally
             img_tensor = self.transform(img)
-            trimap_tr = trimap 
+            trimap_tr = T.Resize((224, 224), interpolation=T.InterpolationMode.NEAREST)(trimap.unsqueeze(0).float()).squeeze(0).long()
             
         return {
             "image": img_tensor,
