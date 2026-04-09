@@ -153,7 +153,12 @@ class MultiTaskPerceptionModel(nn.Module):
                 print(f"[CKPT] UNet load_state_dict failed: {e}", flush=True)
 
     def forward(self, x: torch.Tensor):
-        """Single forward pass returning all three task outputs.
+        """Single forward pass with Test-Time Augmentation.
+
+        Uses horizontal flip TTA to improve predictions:
+        - Classification: average logits
+        - Localization: average boxes (flip cx back)
+        - Segmentation: average logits (flip back)
 
         Returns:
             dict with keys:
@@ -161,9 +166,29 @@ class MultiTaskPerceptionModel(nn.Module):
               'localization'   : [B, 4] box in pixel space [cx, cy, w, h]
               'segmentation'   : [B, seg_classes, H, W] logits
         """
+        # Original predictions
         cls_logits = self.classifier(x)
         loc_coords = self.localizer(x)
         seg_logits = self.unet(x)
+
+        # TTA: horizontal flip
+        x_flip = torch.flip(x, dims=[3])  # flip W dimension
+
+        cls_logits_flip = self.classifier(x_flip)
+        loc_coords_flip = self.localizer(x_flip)
+        seg_logits_flip = self.unet(x_flip)
+
+        # Average classification logits
+        cls_logits = (cls_logits + cls_logits_flip) / 2.0
+
+        # Average localization: mirror cx back (cx_flip = 224 - cx)
+        loc_coords_flip_corrected = loc_coords_flip.clone()
+        loc_coords_flip_corrected[:, 0] = 224.0 - loc_coords_flip[:, 0]  # flip cx
+        loc_coords = (loc_coords + loc_coords_flip_corrected) / 2.0
+
+        # Average segmentation: flip predictions back then average
+        seg_logits_flip_back = torch.flip(seg_logits_flip, dims=[3])
+        seg_logits = (seg_logits + seg_logits_flip_back) / 2.0
 
         return {
             "classification": cls_logits,
