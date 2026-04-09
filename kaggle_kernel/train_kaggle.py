@@ -23,6 +23,8 @@ else:
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "wandb"], check=True)
 
 # ── Clone repo ─────────────────────────────────────────────────────────────
+if os.path.exists(REPO_DIR):
+    shutil.rmtree(REPO_DIR)
 os.makedirs(REPO_DIR, exist_ok=True)
 subprocess.run(["git", "clone", "--depth=1", REPO_URL, REPO_DIR], check=True)
 os.chdir(REPO_DIR)
@@ -32,10 +34,11 @@ os.environ["WANDB_MODE"] = "offline"
 
 # ── Training ───────────────────────────────────────────────────────────────
 # num_workers=0 avoids "storage not resizable" bug with pin_memory in this Kaggle env
+# Epochs bumped to 50 for better convergence
 tasks = [
-    f"{sys.executable} train.py --task classifier --epochs 30 --batch_size 64 --lr 3e-4 --run_name cls_v1 --num_workers 0",
-    f"{sys.executable} train.py --task localizer  --epochs 30 --batch_size 64 --lr 3e-4 --run_name loc_v1 --num_workers 0",
-    f"{sys.executable} train.py --task unet       --epochs 30 --batch_size 32 --lr 3e-4 --run_name unet_v1 --num_workers 0",
+    f"{sys.executable} train.py --task classifier --epochs 50 --batch_size 64 --lr 3e-4 --run_name cls_v2 --num_workers 0",
+    f"{sys.executable} train.py --task localizer  --epochs 50 --batch_size 64 --lr 3e-4 --run_name loc_v2 --num_workers 0",
+    f"{sys.executable} train.py --task unet       --epochs 50 --batch_size 32 --lr 3e-4 --run_name unet_v2 --num_workers 0",
 ]
 for cmd in tasks:
     print(f"\n{'='*60}\n{cmd}\n{'='*60}", flush=True)
