@@ -26,7 +26,8 @@ _STD  = [0.229, 0.224, 0.225]
 TRAIN_TRANSFORM = T.Compose([
     T.Resize((224, 224)),
     T.RandomHorizontalFlip(),
-    T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1, hue=0.02),
+    T.RandomRotation(10),
+    T.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2, hue=0.05),
     T.ToTensor(),
     T.Normalize(mean=_MEAN, std=_STD),
 ])
@@ -130,13 +131,13 @@ def train_localizer(args, device):
 
     optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
-    mse_fn    = nn.MSELoss()
+    sl1_fn    = nn.SmoothL1Loss()
     iou_fn    = IoULoss()
 
     best_val_loss = float("inf")
     for epoch in range(args.epochs):
-        # Unfreeze encoder halfway through
-        if epoch == args.epochs // 2:
+        # Unfreeze encoder at 1/3 (earlier gives more fine-tuning time)
+        if epoch == args.epochs // 3:
             for p in model.encoder.parameters():
                 p.requires_grad = True
             optimizer = optim.AdamW(model.parameters(), lr=args.lr * 0.1, weight_decay=1e-4)
@@ -150,17 +151,17 @@ def train_localizer(args, device):
             boxes  = batch["bbox_target"].to(device)
             optimizer.zero_grad()
             preds  = model(imgs)
-            # Normalize coords to [0,1] for MSE to keep scale reasonable
-            mse_loss = mse_fn(preds / 224.0, boxes / 224.0)
+            # SmoothL1 on normalized coords + heavier IoU weight
+            sl1_loss = sl1_fn(preds / 224.0, boxes / 224.0)
             iou_loss = iou_fn(preds, boxes)
-            loss = mse_loss + iou_loss
+            loss = sl1_loss + 2.0 * iou_loss
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             train_loss += loss.item()
         scheduler.step()
 
-        val_loss, val_iou = _eval_localizer(model, val_loader, mse_fn, iou_fn, device)
+        val_loss, val_iou = _eval_localizer(model, val_loader, sl1_fn, iou_fn, device)
         print(f"  Epoch {epoch+1}: train_loss={train_loss/len(train_loader):.4f} | val_loss={val_loss:.4f} val_iou={val_iou:.4f}")
         wandb.log({"epoch": epoch+1, "loc/train_loss": train_loss/len(train_loader),
                    "loc/val_loss": val_loss, "loc/val_iou": val_iou})
@@ -173,7 +174,7 @@ def train_localizer(args, device):
     print(f"Best localizer val_loss: {best_val_loss:.4f}")
 
 
-def _eval_localizer(model, loader, mse_fn, iou_fn, device):
+def _eval_localizer(model, loader, sl1_fn, iou_fn, device):
     model.eval()
     total_loss, total_iou, n = 0.0, 0.0, 0
     with torch.no_grad():
@@ -181,9 +182,9 @@ def _eval_localizer(model, loader, mse_fn, iou_fn, device):
             imgs  = batch["image"].to(device)
             boxes = batch["bbox_target"].to(device)
             preds = model(imgs)
-            mse_loss = mse_fn(preds / 224.0, boxes / 224.0)
+            sl1_loss = sl1_fn(preds / 224.0, boxes / 224.0)
             iou_loss = iou_fn(preds, boxes)
-            total_loss += (mse_loss + iou_loss).item()
+            total_loss += (sl1_loss + 2.0 * iou_loss).item()
             # Compute actual IoU for logging
             total_iou += (1.0 - iou_loss.item())
             n += 1
@@ -193,6 +194,19 @@ def _eval_localizer(model, loader, mse_fn, iou_fn, device):
 # ──────────────────────────────────────────────────────────────
 # U-Net Segmentation
 # ──────────────────────────────────────────────────────────────
+def _soft_dice_loss(logits, targets, num_classes=3, eps=1e-6):
+    """Differentiable soft Dice loss for training."""
+    probs = torch.softmax(logits, dim=1)  # [B, C, H, W]
+    loss = 0.0
+    for c in range(num_classes):
+        p = probs[:, c]  # [B, H, W]
+        t = (targets == c).float()  # [B, H, W]
+        inter = (p * t).sum(dim=(1, 2))
+        union = p.sum(dim=(1, 2)) + t.sum(dim=(1, 2))
+        dice = (2.0 * inter + eps) / (union + eps)
+        loss += (1.0 - dice).mean()
+    return loss / num_classes
+
 
 def train_unet(args, device):
     train_ds = OxfordIIITPetDataset(root="./data", split="trainval", download=True, transform=TRAIN_TRANSFORM)
@@ -222,7 +236,8 @@ def train_unet(args, device):
 
     best_val_dice = 0.0
     for epoch in range(args.epochs):
-        if epoch == args.epochs // 2:
+        # Unfreeze at 1/3 for more fine-tuning time
+        if epoch == args.epochs // 3:
             for p in model.encoder.parameters():
                 p.requires_grad = True
             optimizer = optim.AdamW(model.parameters(), lr=args.lr * 0.1, weight_decay=1e-4)
@@ -236,7 +251,10 @@ def train_unet(args, device):
             masks = batch["segmentation_mask"].to(device)
             optimizer.zero_grad()
             logits = model(imgs)
-            loss   = ce_fn(logits, masks)
+            # Combined CE + Dice loss for better mask quality
+            ce_loss   = ce_fn(logits, masks)
+            dice_loss = _soft_dice_loss(logits, masks)
+            loss = ce_loss + dice_loss
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()

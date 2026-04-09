@@ -34,11 +34,11 @@ os.environ["WANDB_MODE"] = "offline"
 
 # ── Training ───────────────────────────────────────────────────────────────
 # num_workers=0 avoids "storage not resizable" bug with pin_memory in this Kaggle env
-# Epochs bumped to 50 for better convergence
+# v3: 80 epochs, SmoothL1+IoU for localizer, CE+Dice for UNet
 tasks = [
-    f"{sys.executable} train.py --task classifier --epochs 50 --batch_size 64 --lr 3e-4 --run_name cls_v2 --num_workers 0",
-    f"{sys.executable} train.py --task localizer  --epochs 50 --batch_size 64 --lr 3e-4 --run_name loc_v2 --num_workers 0",
-    f"{sys.executable} train.py --task unet       --epochs 50 --batch_size 32 --lr 3e-4 --run_name unet_v2 --num_workers 0",
+    f"{sys.executable} train.py --task classifier --epochs 80 --batch_size 64 --lr 3e-4 --run_name cls_v3 --num_workers 0",
+    f"{sys.executable} train.py --task localizer  --epochs 80 --batch_size 64 --lr 3e-4 --run_name loc_v3 --num_workers 0",
+    f"{sys.executable} train.py --task unet       --epochs 80 --batch_size 32 --lr 3e-4 --run_name unet_v3 --num_workers 0",
 ]
 for cmd in tasks:
     print(f"\n{'='*60}\n{cmd}\n{'='*60}", flush=True)

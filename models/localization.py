@@ -16,13 +16,14 @@ class VGG11Localizer(nn.Module):
         # Global Average Pooling
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
 
-        # Regression head: 512-dim GAP vector -> 4 box coords
+        # Regression head: wider network for better box precision
         self.regressor = nn.Sequential(
+            nn.Linear(512, 512),
+            nn.ReLU(inplace=True),
+            CustomDropout(p=0.3),
             nn.Linear(512, 256),
             nn.ReLU(inplace=True),
-            nn.Linear(256, 64),
-            nn.ReLU(inplace=True),
-            nn.Linear(64, 4),
+            nn.Linear(256, 4),
             nn.Sigmoid()  # Scale outputs to [0, 1]
         )
 
