@@ -22,28 +22,21 @@ from data.pets_dataset import OxfordIIITPetDataset
 _MEAN = [0.485, 0.456, 0.406]
 _STD  = [0.229, 0.224, 0.225]
 
-# Training transform: augmentation to reduce overfitting
+# Training transform: NO RandomCrop (breaks bbox/mask alignment)
 TRAIN_TRANSFORM = T.Compose([
-    T.Resize((256, 256)),
-    T.RandomCrop(224),
+    T.Resize((224, 224)),
     T.RandomHorizontalFlip(),
-    T.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2, hue=0.05),
+    T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1, hue=0.02),
     T.ToTensor(),
     T.Normalize(mean=_MEAN, std=_STD),
 ])
 
-# Validation/test transform: no augmentation
+# Validation/test transform
 VAL_TRANSFORM = T.Compose([
     T.Resize((224, 224)),
     T.ToTensor(),
     T.Normalize(mean=_MEAN, std=_STD),
 ])
-
-
-def save_fp16(state_dict, path):
-    """Save state dict in float16 to keep file size small (~half of fp32)."""
-    fp16_sd = {k: (v.half() if v.is_floating_point() else v) for k, v in state_dict.items()}
-    torch.save(fp16_sd, path)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -57,9 +50,9 @@ def train_classifier(args, device):
     val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=(args.num_workers > 0))
 
     model = VGG11Classifier(num_classes=37, dropout_p=args.dropout_p).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
-    loss_fn   = nn.CrossEntropyLoss()
+    loss_fn   = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     best_val_acc = 0.0
     for epoch in range(args.epochs):
@@ -72,6 +65,7 @@ def train_classifier(args, device):
             logits = model(imgs)
             loss   = loss_fn(logits, labels)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             train_loss += loss.item()
             correct    += (logits.argmax(1) == labels).sum().item()
@@ -86,8 +80,8 @@ def train_classifier(args, device):
 
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            save_fp16(model.state_dict(), "checkpoints/classifier.pth")
-            print(f"  Saved classifier.pth fp16 (val_acc={val_acc:.4f})")
+            torch.save(model.state_dict(), "checkpoints/classifier.pth")
+            print(f"  Saved classifier.pth (val_acc={val_acc:.4f})")
 
     print(f"Best classifier val_acc: {best_val_acc:.4f}")
 
@@ -123,6 +117,10 @@ def train_localizer(args, device):
     if os.path.exists(cls_ckpt):
         cls_sd = torch.load(cls_ckpt, map_location=device, weights_only=False)
         encoder_sd = {k[len("encoder."):]: v for k, v in cls_sd.items() if k.startswith("encoder.")}
+        # Handle fp16 → fp32 for older checkpoints
+        for k in encoder_sd:
+            if isinstance(encoder_sd[k], torch.Tensor) and encoder_sd[k].dtype == torch.float16:
+                encoder_sd[k] = encoder_sd[k].float()
         model.encoder.load_state_dict(encoder_sd)
         print("Loaded pretrained encoder from classifier.pth")
 
@@ -130,7 +128,7 @@ def train_localizer(args, device):
         for p in model.encoder.parameters():
             p.requires_grad = False
 
-    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=1e-4)
+    optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     mse_fn    = nn.MSELoss()
     iou_fn    = IoULoss()
@@ -141,7 +139,7 @@ def train_localizer(args, device):
         if epoch == args.epochs // 2:
             for p in model.encoder.parameters():
                 p.requires_grad = True
-            optimizer = optim.Adam(model.parameters(), lr=args.lr * 0.1, weight_decay=1e-4)
+            optimizer = optim.AdamW(model.parameters(), lr=args.lr * 0.1, weight_decay=1e-4)
             scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs - epoch)
             print("  Unfroze encoder for fine-tuning")
 
@@ -152,34 +150,44 @@ def train_localizer(args, device):
             boxes  = batch["bbox_target"].to(device)
             optimizer.zero_grad()
             preds  = model(imgs)
-            loss   = mse_fn(preds, boxes) + iou_fn(preds, boxes)
+            # Normalize coords to [0,1] for MSE to keep scale reasonable
+            mse_loss = mse_fn(preds / 224.0, boxes / 224.0)
+            iou_loss = iou_fn(preds, boxes)
+            loss = mse_loss + iou_loss
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             train_loss += loss.item()
         scheduler.step()
 
-        val_loss = _eval_localizer(model, val_loader, mse_fn, iou_fn, device)
-        print(f"  Epoch {epoch+1}: train_loss={train_loss/len(train_loader):.4f} | val_loss={val_loss:.4f}")
-        wandb.log({"epoch": epoch+1, "loc/train_loss": train_loss/len(train_loader), "loc/val_loss": val_loss})
+        val_loss, val_iou = _eval_localizer(model, val_loader, mse_fn, iou_fn, device)
+        print(f"  Epoch {epoch+1}: train_loss={train_loss/len(train_loader):.4f} | val_loss={val_loss:.4f} val_iou={val_iou:.4f}")
+        wandb.log({"epoch": epoch+1, "loc/train_loss": train_loss/len(train_loader),
+                   "loc/val_loss": val_loss, "loc/val_iou": val_iou})
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            save_fp16(model.state_dict(), "checkpoints/localizer.pth")
-            print(f"  Saved localizer.pth fp16 (val_loss={val_loss:.4f})")
+            torch.save(model.state_dict(), "checkpoints/localizer.pth")
+            print(f"  Saved localizer.pth (val_loss={val_loss:.4f})")
 
     print(f"Best localizer val_loss: {best_val_loss:.4f}")
 
 
 def _eval_localizer(model, loader, mse_fn, iou_fn, device):
     model.eval()
-    total_loss = 0.0
+    total_loss, total_iou, n = 0.0, 0.0, 0
     with torch.no_grad():
         for batch in loader:
             imgs  = batch["image"].to(device)
             boxes = batch["bbox_target"].to(device)
             preds = model(imgs)
-            total_loss += (mse_fn(preds, boxes) + iou_fn(preds, boxes)).item()
-    return total_loss / len(loader)
+            mse_loss = mse_fn(preds / 224.0, boxes / 224.0)
+            iou_loss = iou_fn(preds, boxes)
+            total_loss += (mse_loss + iou_loss).item()
+            # Compute actual IoU for logging
+            total_iou += (1.0 - iou_loss.item())
+            n += 1
+    return total_loss / len(loader), total_iou / n
 
 
 # ──────────────────────────────────────────────────────────────
@@ -199,13 +207,16 @@ def train_unet(args, device):
     if os.path.exists(cls_ckpt):
         cls_sd = torch.load(cls_ckpt, map_location=device, weights_only=False)
         encoder_sd = {k[len("encoder."):]: v for k, v in cls_sd.items() if k.startswith("encoder.")}
+        for k in encoder_sd:
+            if isinstance(encoder_sd[k], torch.Tensor) and encoder_sd[k].dtype == torch.float16:
+                encoder_sd[k] = encoder_sd[k].float()
         model.encoder.load_state_dict(encoder_sd)
         print("Loaded pretrained encoder from classifier.pth")
 
         for p in model.encoder.parameters():
             p.requires_grad = False
 
-    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=1e-4)
+    optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     ce_fn     = nn.CrossEntropyLoss()
 
@@ -214,7 +225,7 @@ def train_unet(args, device):
         if epoch == args.epochs // 2:
             for p in model.encoder.parameters():
                 p.requires_grad = True
-            optimizer = optim.Adam(model.parameters(), lr=args.lr * 0.1, weight_decay=1e-4)
+            optimizer = optim.AdamW(model.parameters(), lr=args.lr * 0.1, weight_decay=1e-4)
             scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs - epoch)
             print("  Unfroze encoder for fine-tuning")
 
@@ -227,6 +238,7 @@ def train_unet(args, device):
             logits = model(imgs)
             loss   = ce_fn(logits, masks)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             train_loss += loss.item()
         scheduler.step()
@@ -238,8 +250,8 @@ def train_unet(args, device):
 
         if val_dice > best_val_dice:
             best_val_dice = val_dice
-            save_fp16(model.state_dict(), "checkpoints/unet.pth")
-            print(f"  Saved unet.pth fp16 (val_dice={val_dice:.4f})")
+            torch.save(model.state_dict(), "checkpoints/unet.pth")
+            print(f"  Saved unet.pth (val_dice={val_dice:.4f})")
 
     print(f"Best unet val_dice: {best_val_dice:.4f}")
 
@@ -296,7 +308,7 @@ if __name__ == "__main__":
                         choices=["classifier", "localizer", "unet", "all"],
                         help="Which model to train")
     parser.add_argument("--run_name",   type=str, default="full_pipeline")
-    parser.add_argument("--epochs",     type=int, default=30)
+    parser.add_argument("--epochs",     type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--lr",         type=float, default=1e-4)
     parser.add_argument("--dropout_p",  type=float, default=0.5)
