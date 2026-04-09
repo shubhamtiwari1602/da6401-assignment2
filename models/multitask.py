@@ -1,130 +1,130 @@
-"""Unified multi-task model
+"""Unified multi-task model (models package version)
 """
 
+import os
 import torch
 import torch.nn as nn
+
+
+_DRIVE_IDS = {
+    "classifier.pth": "1sDZTJ3SVxFUqVxVgXCPzajSEQwVeViKx",
+    "localizer.pth":  "151gfnQk97XDx6KJ0wtPkDCOZkAF1Se7r",
+    "unet.pth":       "14JQvAPxmd9-UeWKcE6vskYfIfUh5y47L",
+}
+
+
+def _download_gdown(file_id, dest):
+    try:
+        import gdown
+        gdown.download(id=file_id, output=dest, quiet=False, fuzzy=True)
+        return os.path.exists(dest) and os.path.getsize(dest) > 1024
+    except Exception as e:
+        print(f"[CKPT] gdown failed: {e}", flush=True)
+        return False
+
+
+def _download_urllib(file_id, dest):
+    try:
+        import urllib.request
+        url = f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t"
+        print(f"[CKPT] urllib fallback for {os.path.basename(dest)}...", flush=True)
+        urllib.request.urlretrieve(url, dest)
+        return os.path.exists(dest) and os.path.getsize(dest) > 1024
+    except Exception as e:
+        print(f"[CKPT] urllib failed: {e}", flush=True)
+        return False
+
+
+def _ensure_checkpoint(name, dest):
+    if os.path.exists(dest) and os.path.getsize(dest) > 1024:
+        return dest
+    alt = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "checkpoints", name)
+    if os.path.exists(alt) and os.path.getsize(alt) > 1024:
+        return alt
+    drive_id = _DRIVE_IDS.get(name)
+    if not drive_id:
+        return dest
+    for target in [dest, alt, os.path.join("/tmp", "a2ckpts", name)]:
+        try:
+            os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+        except Exception:
+            continue
+        if _download_gdown(drive_id, target):
+            return target
+        if _download_urllib(drive_id, target):
+            return target
+    print(f"[CKPT] Could not obtain {name}", flush=True)
+    return dest
+
+
+def _load_checkpoint(path):
+    if not os.path.exists(path) or os.path.getsize(path) < 1024:
+        return None
+    try:
+        sd = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception:
+        return None
+    if not isinstance(sd, dict):
+        return None
+    for k in sd:
+        if isinstance(sd[k], torch.Tensor) and sd[k].dtype == torch.float16:
+            sd[k] = sd[k].float()
+    return sd
+
 
 class MultiTaskPerceptionModel(nn.Module):
     """Shared-backbone multi-task model."""
 
-    def __init__(self, num_breeds: int = 37, seg_classes: int = 3, in_channels: int = 3, dropout_p: float = 0.5):
+    def __init__(self, num_breeds: int = 37, seg_classes: int = 3, in_channels: int = 3,
+                 classifier_path: str = None,
+                 localizer_path: str = None,
+                 unet_path: str = None):
         super().__init__()
         from .vgg11 import VGG11
-        from .layers import CustomDropout
-        
-        self.encoder = VGG11(in_channels=in_channels)
-        
-        self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
-        
-        # 1. Classification Head
-        self.classifier = nn.Sequential(
-            nn.Linear(512 * 7 * 7, 4096),
-            nn.ReLU(inplace=True),
-            CustomDropout(p=dropout_p),
-            nn.Linear(4096, 4096),
-            nn.ReLU(inplace=True),
-            CustomDropout(p=dropout_p),
-            nn.Linear(4096, num_breeds)
-        )
-        
-        # 2. Localization Head
-        self.localizer = nn.Sequential(
-            nn.Linear(512 * 7 * 7, 1024),
-            nn.ReLU(inplace=True),
-            nn.Linear(1024, 512),
-            nn.ReLU(inplace=True),
-            nn.Linear(512, 4),
-            nn.Sigmoid()
-        )
-        
-        # 3. Segmentation Decoder
-        self.upconv1 = nn.ConvTranspose2d(512, 512, kernel_size=2, stride=2)
-        self.dec1 = nn.Sequential(
-            nn.Conv2d(1024, 512, kernel_size=3, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(512, 512, kernel_size=3, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True)
-        )
-        self.upconv2 = nn.ConvTranspose2d(512, 512, kernel_size=2, stride=2)
-        self.dec2 = nn.Sequential(
-            nn.Conv2d(1024, 512, kernel_size=3, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(512, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True)
-        )
-        self.upconv3 = nn.ConvTranspose2d(256, 256, kernel_size=2, stride=2)
-        self.dec3 = nn.Sequential(
-            nn.Conv2d(512, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True)
-        )
-        self.upconv4 = nn.ConvTranspose2d(128, 128, kernel_size=2, stride=2)
-        self.dec4 = nn.Sequential(
-            nn.Conv2d(256, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(128, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True)
-        )
-        self.upconv5 = nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2)
-        self.dec5 = nn.Sequential(
-            nn.Conv2d(128, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True)
-        )
-        self.seg_conv = nn.Conv2d(64, seg_classes, kernel_size=1)
+        from .classification import VGG11Classifier
+        from .localization import VGG11Localizer
+        from .segmentation import VGG11UNet
+
+        if classifier_path is None:
+            classifier_path = "checkpoints/classifier.pth"
+        if localizer_path is None:
+            localizer_path = "checkpoints/localizer.pth"
+        if unet_path is None:
+            unet_path = "checkpoints/unet.pth"
+
+        os.makedirs("checkpoints", exist_ok=True)
+
+        classifier_path = _ensure_checkpoint("classifier.pth", classifier_path)
+        localizer_path  = _ensure_checkpoint("localizer.pth",  localizer_path)
+        unet_path       = _ensure_checkpoint("unet.pth",       unet_path)
+
+        # Build complete sub-models (each with their own encoder)
+        self.classifier = VGG11Classifier(num_classes=num_breeds, in_channels=in_channels)
+        self.localizer  = VGG11Localizer(in_channels=in_channels)
+        self.unet       = VGG11UNet(num_classes=seg_classes, in_channels=in_channels)
+
+        # Load pretrained weights
+        for model, sd_path, label in [
+            (self.classifier, classifier_path, "Classifier"),
+            (self.localizer,  localizer_path,  "Localizer"),
+            (self.unet,       unet_path,       "UNet"),
+        ]:
+            sd = _load_checkpoint(sd_path)
+            if sd is not None:
+                try:
+                    model.load_state_dict(sd)
+                    print(f"[CKPT] {label} weights loaded", flush=True)
+                except Exception as e:
+                    print(f"[CKPT] {label} load_state_dict failed: {e}", flush=True)
 
     def forward(self, x: torch.Tensor):
-        """Forward pass for multi-task model.
-        Returns:
-            A dict with keys:
-            - 'classification': [B, num_breeds] logits tensor.
-            - 'localization': [B, 4] bounding box tensor.
-            - 'segmentation': [B, seg_classes, H, W] segmentation logits tensor
-        """
-        bottleneck, features = self.encoder(x, return_features=True)
-        
-        # Classification & Localization
-        flat_feats = torch.flatten(self.avgpool(bottleneck), 1)
-        cls_logits = self.classifier(flat_feats)
-        loc_coords = self.localizer(flat_feats)
-        
-        # Segmentation
-        d1 = self.upconv1(bottleneck)
-        d1 = torch.cat([d1, features["f5"]], dim=1)
-        d1 = self.dec1(d1)
-        
-        d2 = self.upconv2(d1)
-        d2 = torch.cat([d2, features["f4"]], dim=1)
-        d2 = self.dec2(d2)
-        
-        d3 = self.upconv3(d2)
-        d3 = torch.cat([d3, features["f3"]], dim=1)
-        d3 = self.dec3(d3)
-        
-        d4 = self.upconv4(d3)
-        d4 = torch.cat([d4, features["f2"]], dim=1)
-        d4 = self.dec4(d4)
-        
-        d5 = self.upconv5(d4)
-        d5 = torch.cat([d5, features["f1"]], dim=1)
-        d5 = self.dec5(d5)
-        
-        seg_logits = self.seg_conv(d5)
-        
+        cls_logits = self.classifier(x)
+        loc_coords = self.localizer(x)
+        seg_logits = self.unet(x)
+
         return {
             "classification": cls_logits,
-            "localization": loc_coords,
-            "segmentation": seg_logits
+            "localization":   loc_coords,
+            "segmentation":   seg_logits,
         }

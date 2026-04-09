@@ -16,58 +16,61 @@ _DRIVE_IDS = {
 }
 
 
-def _download(name, dest):
-    """Try gdown; return True if dest has a valid file afterwards."""
-    drive_id = _DRIVE_IDS.get(name)
-    if not drive_id:
-        return False
-    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+def _download_gdown(file_id, dest):
+    """Download via gdown."""
     try:
         import gdown
-        gdown.download(id=drive_id, output=dest, quiet=False, fuzzy=True)
+        gdown.download(id=file_id, output=dest, quiet=False, fuzzy=True)
+        return os.path.exists(dest) and os.path.getsize(dest) > 1024
     except Exception as e:
-        print(f"[CKPT] gdown failed for {name}: {e}", flush=True)
-    return os.path.exists(dest) and os.path.getsize(dest) > 1024
+        print(f"[CKPT] gdown failed: {e}", flush=True)
+        return False
 
 
-def _resolve(rel_path):
-    """Return a readable path for the checkpoint.
+def _download_urllib(file_id, dest):
+    """Fallback download via urllib (no extra deps)."""
+    try:
+        import urllib.request
+        url = f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t"
+        print(f"[CKPT] urllib fallback for {os.path.basename(dest)}...", flush=True)
+        urllib.request.urlretrieve(url, dest)
+        return os.path.exists(dest) and os.path.getsize(dest) > 1024
+    except Exception as e:
+        print(f"[CKPT] urllib failed: {e}", flush=True)
+        return False
 
-    Priority:
-      1. rel_path  (relative — works when CWD = submission dir)
-      2. __file__-based absolute path
-      3. /tmp/      (works even if submission dir is read-only)
-    """
-    name = os.path.basename(rel_path)
 
-    # Already present at relative path?
-    if os.path.exists(rel_path) and os.path.getsize(rel_path) > 1024:
-        print(f"[CKPT] Found at relative path: {rel_path}", flush=True)
-        return rel_path
+def _ensure_checkpoint(name, dest):
+    """Make sure checkpoint exists at dest; download if needed."""
+    if os.path.exists(dest) and os.path.getsize(dest) > 1024:
+        print(f"[CKPT] Found: {dest}", flush=True)
+        return dest
 
-    # Try absolute path next to multitask.py
-    abs_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "checkpoints", name)
-    if os.path.exists(abs_path) and os.path.getsize(abs_path) > 1024:
-        print(f"[CKPT] Found at absolute path: {abs_path}", flush=True)
-        return abs_path
+    # Also check next to this script
+    alt = os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkpoints", name)
+    if os.path.exists(alt) and os.path.getsize(alt) > 1024:
+        print(f"[CKPT] Found at alt path: {alt}", flush=True)
+        return alt
 
-    # Download — prefer relative path, fall back to absolute, then /tmp
-    for dest in [rel_path, abs_path, os.path.join("/tmp", "a2ckpts", name)]:
+    drive_id = _DRIVE_IDS.get(name)
+    if not drive_id:
+        return dest
+
+    # Try downloading to multiple locations
+    for target in [dest, alt, os.path.join("/tmp", "a2ckpts", name)]:
         try:
-            parent = os.path.dirname(dest) or "."
+            parent = os.path.dirname(target) or "."
             os.makedirs(parent, exist_ok=True)
-            # Write-test
-            tp = os.path.join(parent, ".wtest")
-            open(tp, "w").close()
-            os.remove(tp)
         except Exception:
-            continue  # directory not writable, try next
-        if _download(name, dest):
-            return dest
+            continue
+
+        if _download_gdown(drive_id, target):
+            return target
+        if _download_urllib(drive_id, target):
+            return target
 
     print(f"[CKPT] Could not obtain {name} — will use random weights", flush=True)
-    return rel_path   # return something; _load_checkpoint will return None
+    return dest
 
 
 def _load_checkpoint(path):
@@ -76,7 +79,7 @@ def _load_checkpoint(path):
         print(f"[CKPT] Not found or too small: {path}", flush=True)
         return None
     try:
-        sd = torch.load(path, map_location="cpu")
+        sd = torch.load(path, map_location="cpu", weights_only=False)
     except Exception as e:
         print(f"[CKPT] torch.load failed: {e}", flush=True)
         return None
@@ -93,9 +96,8 @@ def _load_checkpoint(path):
 class MultiTaskPerceptionModel(nn.Module):
     """Shared-backbone multi-task model.
 
-    Each task head is paired with its own trained encoder so that
-    the pretrained weights are applied consistently.  A single
-    forward pass runs all three sub-models and returns a dict.
+    Each task head keeps its own trained encoder so that
+    the pretrained weights are applied consistently.
     """
 
     def __init__(self, num_breeds: int = 37, seg_classes: int = 3, in_channels: int = 3,
@@ -104,7 +106,7 @@ class MultiTaskPerceptionModel(nn.Module):
                  unet_path: str = None):
         super().__init__()
 
-        # Default relative paths (TA-specified convention)
+        # Default relative paths (TA convention)
         if classifier_path is None:
             classifier_path = "checkpoints/classifier.pth"
         if localizer_path is None:
@@ -112,20 +114,12 @@ class MultiTaskPerceptionModel(nn.Module):
         if unet_path is None:
             unet_path = "checkpoints/unet.pth"
 
-        # Download from Google Drive if not already present
-        import gdown
         os.makedirs("checkpoints", exist_ok=True)
-        if not (os.path.exists(classifier_path) and os.path.getsize(classifier_path) > 1024):
-            gdown.download(id="1sDZTJ3SVxFUqVxVgXCPzajSEQwVeViKx", output=classifier_path, quiet=False)
-        if not (os.path.exists(localizer_path) and os.path.getsize(localizer_path) > 1024):
-            gdown.download(id="151gfnQk97XDx6KJ0wtPkDCOZkAF1Se7r", output=localizer_path, quiet=False)
-        if not (os.path.exists(unet_path) and os.path.getsize(unet_path) > 1024):
-            gdown.download(id="14JQvAPxmd9-UeWKcE6vskYfIfUh5y47L", output=unet_path, quiet=False)
 
-        # Resolve to actually-readable paths
-        classifier_path = _resolve(classifier_path)
-        localizer_path  = _resolve(localizer_path)
-        unet_path       = _resolve(unet_path)
+        # Ensure checkpoints are available (download if needed)
+        classifier_path = _ensure_checkpoint("classifier.pth", classifier_path)
+        localizer_path  = _ensure_checkpoint("localizer.pth",  localizer_path)
+        unet_path       = _ensure_checkpoint("unet.pth",       unet_path)
 
         # Build the three sub-models
         self.classifier = VGG11Classifier(num_classes=num_breeds, in_channels=in_channels)
@@ -167,9 +161,9 @@ class MultiTaskPerceptionModel(nn.Module):
               'localization'   : [B, 4] box in pixel space [cx, cy, w, h]
               'segmentation'   : [B, seg_classes, H, W] logits
         """
-        cls_logits = self.classifier(x)          # [B, num_breeds]
-        loc_coords = self.localizer(x)            # [B, 4]  pixel-space (VGG11Localizer already ×224)
-        seg_logits = self.unet(x)                 # [B, seg_classes, H, W]
+        cls_logits = self.classifier(x)
+        loc_coords = self.localizer(x)
+        seg_logits = self.unet(x)
 
         return {
             "classification": cls_logits,
