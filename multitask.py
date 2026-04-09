@@ -9,6 +9,37 @@ from models.classification import VGG11Classifier
 from models.localization import VGG11Localizer
 from models.segmentation import VGG11UNet
 
+# Absolute path to the directory containing this file — works regardless of CWD
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+_DRIVE_IDS = {
+    "classifier.pth": "1sDZTJ3SVxFUqVxVgXCPzajSEQwVeViKx",
+    "localizer.pth":  "151gfnQk97XDx6KJ0wtPkDCOZkAF1Se7r",
+    "unet.pth":       "14JQvAPxmd9-UeWKcE6vskYfIfUh5y47L",
+}
+
+
+def _ensure_checkpoint(name: str, dest_path: str) -> None:
+    """Download checkpoint from Google Drive if not already present or too small."""
+    if os.path.exists(dest_path) and os.path.getsize(dest_path) > 1024:
+        print(f"[CKPT] Already present: {dest_path}", flush=True)
+        return
+
+    drive_id = _DRIVE_IDS.get(os.path.basename(dest_path))
+    if drive_id is None:
+        print(f"[CKPT] No Drive ID for {name}", flush=True)
+        return
+
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    print(f"[CKPT] Downloading {name} from Google Drive ...", flush=True)
+    try:
+        import gdown
+        gdown.download(id=drive_id, output=dest_path, quiet=False, fuzzy=True)
+        size = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
+        print(f"[CKPT] Downloaded {size/1e6:.1f} MB → {dest_path}", flush=True)
+    except Exception as e:
+        print(f"[CKPT] Download failed for {name}: {e}", flush=True)
+
 
 def _load_checkpoint(path):
     """Load a state dict from a .pth file, converting fp16 tensors to fp32."""
@@ -16,7 +47,15 @@ def _load_checkpoint(path):
         print(f"[CKPT] Not found or too small: {path}", flush=True)
         return None
 
-    sd = torch.load(path, map_location="cpu", weights_only=False)
+    try:
+        sd = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception as e:
+        print(f"[CKPT] torch.load failed for {path}: {e}", flush=True)
+        return None
+
+    if not isinstance(sd, dict):
+        print(f"[CKPT] Unexpected format in {path}", flush=True)
+        return None
 
     # Convert fp16 → fp32
     for k in sd:
@@ -35,20 +74,19 @@ class MultiTaskPerceptionModel(nn.Module):
                  unet_path: str = None):
         super().__init__()
 
-        # Default relative paths (autograder runs from repo root)
+        # Use absolute paths relative to this file — immune to CWD differences
+        ckpt_dir = os.path.join(_HERE, "checkpoints")
         if classifier_path is None:
-            classifier_path = "checkpoints/classifier.pth"
+            classifier_path = os.path.join(ckpt_dir, "classifier.pth")
         if localizer_path is None:
-            localizer_path = "checkpoints/localizer.pth"
+            localizer_path = os.path.join(ckpt_dir, "localizer.pth")
         if unet_path is None:
-            unet_path = "checkpoints/unet.pth"
+            unet_path = os.path.join(ckpt_dir, "unet.pth")
 
-        # Download checkpoints from Google Drive
-        import gdown
-        os.makedirs("checkpoints", exist_ok=True)
-        gdown.download(id="1sDZTJ3SVxFUqVxVgXCPzajSEQwVeViKx", output=classifier_path, quiet=False)
-        gdown.download(id="151gfnQk97XDx6KJ0wtPkDCOZkAF1Se7r", output=localizer_path, quiet=False)
-        gdown.download(id="14JQvAPxmd9-UeWKcE6vskYfIfUh5y47L", output=unet_path, quiet=False)
+        # Download checkpoints from Google Drive if needed
+        _ensure_checkpoint("classifier.pth", classifier_path)
+        _ensure_checkpoint("localizer.pth",  localizer_path)
+        _ensure_checkpoint("unet.pth",       unet_path)
 
         # Build component models
         classifier = VGG11Classifier(num_classes=num_breeds, in_channels=in_channels)
